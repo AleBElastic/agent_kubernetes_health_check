@@ -46,8 +46,7 @@ This demo demonstrates a deterministic, event-driven approach to infrastructure 
 
 In this demo, a dedicated service within the *`frontend-ecommerce`* deployment simulates high memory usage, triggering the alerting logic. The remediation service, deployed as *`cluster-scaler-api`*, exposes a REST API that accepts a list of deployment names. This service is defined in the *`cluster-manager`* template, which includes RBAC configurations and a LoadBalancer service to enable cluster-wide operations.
 
-Workflow is described in the *`workflow.yaml`* file
----
+Workflow is described in the *`workflow.yaml`* file.
 
 ## Usage
 

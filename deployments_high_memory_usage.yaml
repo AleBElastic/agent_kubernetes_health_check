@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend-ecommerce
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend-ecommerce
+  template:
+    metadata:
+      labels:
+        app: frontend-ecommerce
+    spec:
+      containers:
+      - name: frontend-ecommerce
+        # Use an image that has stress-ng pre-installed, or a linux base
+        image: polinux/stress-ng 
+        resources:
+          limits:
+            memory: "500Mi"  # The "ceiling"
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          while true; do
+            echo "Service is healthy..."
+            echo "Starting heavy memory task..."
+            stress-ng --vm 1 --vm-bytes 400M --timeout 30s
+          done

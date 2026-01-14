@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-service-oom
+  namespace: chaos-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payment-oom
+  template:
+    metadata:
+      labels:
+        app: payment-oom
+    spec:
+      containers:
+      # CONTAINER 1: The "App" that responds to pings
+      - name: payment-app
+        image: busybox
+        ports:
+        - containerPort: 8080
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          echo "Payment API online on port 8080..."
+          # Busybox nc version of a simple web server
+          while true; do 
+            printf 'HTTP/1.1 200 OK\n\n{"status":"ready"}' | nc -l -p 8080
+          done
+
+      # CONTAINER 2: The "Chaos Agent" that triggers OOM
+      - name: chaos-agent
+        image: polinux/stress-ng
+        resources:
+          limits:
+            memory: "256Mi"
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          while true; do
+            echo "Waiting 20s before causing chaos..."
+            sleep 20
+            echo "[CRITICAL] Inducing Memory Leak now!"
+            stress-ng --vm 1 --vm-bytes 400M --timeout 15s
+          done

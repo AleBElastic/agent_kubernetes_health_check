@@ -1,0 +1,88 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: chaos-demo
+---
+# SCENARIO 1: The "CrashLoopBackOff"
+# This pod tries to start, prints a memory error, and dies immediately.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-service
+  namespace: chaos-demo
+  labels:
+    app: payment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payment
+  template:
+    metadata:
+      #annotations:
+        #io.opentelemetry.discovery.logs/enabled: 'true'
+      labels:
+        app: payment
+    spec:
+      containers:
+      - name: payment-app
+        image: busybox
+        # Simulates a critical failure immediately upon startup
+        command: ["/bin/sh", "-c"]
+        args: 
+          - | 
+            sleep 15;
+            echo "Initializing Payment Gateway ...";
+            echo "[ERROR] Java Heap Space OutOfMemoryError at com.ecommerce.payment.TransactionProcessor.process(TransactionProcessor.java:88)";
+            echo "Process terminating...";
+            sleep 15;
+            exit 1;
+        resources:
+          requests:
+            memory: "30Mi"  # Minimum memory required to schedule
+            cpu: "100m"      # 250 millicores (0.25 vCPU)
+          limits:
+            memory: "30Mi"  # Hard limit (container killed if exceeded)
+            cpu: "100m"      # Hard limit (throttled if exceeded)
+---
+# SCENARIO 2: The "Connection Refused"
+# This pod is technically "Running", but the application inside is broken.
+# It loops forever trying to connect to a database that doesn't exist.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cart-service
+  namespace: chaos-demo
+  labels:
+    app: cart
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cart
+  template:
+    metadata:
+      #annotations:
+       # io.opentelemetry.discovery.logs/enabled: 'true'      
+      labels:
+        app: cart
+    spec:
+      containers:
+      - name: cart-app
+        image: python:3.9-slim
+        # Python script to simulate a database connection failure
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            echo "Starting Cart Service v2.1..."
+            while true; do
+              echo "[ERROR] ConnectionRefused: Failed to connect to redis-master:6379. Host not found. at com.ecommerce.cart.Database.connect(Database.java:42)"
+              sleep 5
+            done
+        resources:
+          requests:
+            memory: "30Mi"  # Minimum memory required to schedule
+            cpu: "100m"      # 250 millicores (0.25 vCPU)
+          limits:
+            memory: "30Mi"  # Hard limit (container killed if exceeded)
+            cpu: "100m"      # Hard limit (throttled if exceeded)

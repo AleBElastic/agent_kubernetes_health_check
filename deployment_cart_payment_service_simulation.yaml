@@ -1,0 +1,193 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: chaos-demo
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-service
+  namespace: chaos-demo
+spec:
+  selector:
+    app: payment-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
+---
+# PAYMENT SERVICE: Handles pings AND triggers OOM
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-service
+  namespace: chaos-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payment-service
+  template:
+    metadata:
+      labels:
+        app: payment-service
+    spec:
+      containers:
+      - name: payment-service-container
+        # Using Ubuntu because it's easier to install both tools reliably
+        image: ubuntu:22.04
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "1000m"
+          limits:
+            cpu: "2000m"
+            memory: "256Mi"
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          apt-get update && apt-get install -y stress-ng netcat-openbsd
+          
+          # 1. Start a simple responder in the background
+          # This allows the Cart to get a "Success" while this pod is healthy
+          while true; do 
+            { echo -e "HTTP/1.1 200 OK\n\nOK"; } | nc -l -p 8080
+          done &
+          
+          echo "--- Payment Service Started ---"
+          while true; do
+            echo "[INFO] Service ready waiting for connections..."
+            sleep 20
+            echo "[CRITICAL] Memory leak starting! Attempting to use 500MB..."
+            # This will exceed the 256Mi limit and trigger an OOMKilled event
+            stress-ng --vm 1 --vm-bytes 500M --cpu 1 --timeout 10s
+          done
+---
+# CART SERVICE: Regularly pings the Payment Service
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cart-service
+  namespace: chaos-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cart
+  template:
+    metadata:
+      labels:
+        app: cart
+    spec:
+      containers:
+      - name: cart-app
+        image: busybox
+        resources:
+          requests:
+            cpu: "50m"        
+            memory: "34Mi"  
+          limits:
+            cpu: "50m"
+            memory: "64Mi"
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            while true; do
+              # Try to connect to payment-service on port 80
+              if nc -z -w 2 payment-service 80; then
+                ORDER_ID=$((1000 + RANDOM % 9000))
+                echo "[$(date +%T)] INFO: Order #$ORDER_ID successfully sent to Payment Service."
+              else
+                echo "[$(date +%T)] ERROR: Failed to transmit Order #$ORDER_ID Payment Service unreachable."
+              fi
+              sleep 2
+            done
+---
+# 1. THE STEADY LOAD (Fake Name: Inventory Worker)
+# Aim: High CPU usage, stable memory.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: inventory-worker-01
+spec:
+  containers:
+  - name: worker
+    image: ubuntu:22.04
+    resources:
+      limits:
+        cpu: "800m"
+        memory: "256Mi"
+    command: ["/bin/bash", "-c"]
+    args:
+      - |
+        apt-get update && apt-get install -y stress-ng
+        echo "[INFO] Inventory sync started..."
+        # Constant 70% CPU load
+        stress-ng --cpu 2 --cpu-load 70
+---
+# 2. THE STABLE MEMORY POD (Fake Name: Checkout Processor)
+# Aim: Constant 10% Memory usage and 10% CPU usage. No crashing.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout-processor-v2
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: processor
+  template:
+    metadata:
+      labels:
+        app: processor
+    spec:
+      containers:
+      - name: processor
+        image: ubuntu:22.04
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "200Mi"
+          limits:
+            cpu: "3000m"
+            memory: "500Mi" 
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            apt-get update && apt-get install -y stress-ng netcat-openbsd
+            
+            # --vm 1: One memory stressor
+            # --vm-bytes 50M: Exactly 10% of the 500Mi limit
+            # --vm-keep: Do not release the memory (prevents the 'sawtooth' pattern)
+            # --cpu 1 --cpu-load 10: Adds a constant 10% CPU hum
+            stress-ng --vm 1 --vm-bytes 10M --vm-keep --cpu 1 --cpu-load 10
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend-ecommerce
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend-ecommerce
+  template:
+    metadata:
+      labels:
+        app: frontend-ecommerce
+    spec:
+      containers:
+      - name: frontend-ecommerce
+        # Use an image that has stress-ng pre-installed, or a linux base
+        image: polinux/stress-ng 
+        resources:
+          limits:
+            memory: "500Mi"  # The "ceiling"
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          while true; do
+            echo "Service is healthy..."
+            echo "Starting heavy memory task..."
+            stress-ng --vm 1 --vm-bytes 400M --vm-keep --vm-populate
+          done

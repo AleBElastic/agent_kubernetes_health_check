@@ -1,0 +1,152 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cluster-manager-sa
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: deployment-manager-role
+rules:
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["get", "patch", "update", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cluster-manager-binding
+subjects:
+- kind: ServiceAccount
+  name: cluster-manager-sa
+roleRef:
+  kind: Role
+  name: deployment-manager-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cluster-scaler-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: scaler
+  template:
+    metadata:
+      labels:
+        app: scaler
+    spec:
+      serviceAccountName: cluster-manager-sa
+      containers:
+      - name: api-handler
+        image: python:3.9-slim
+        # Corrected field: securityContext instead of user
+        securityContext:
+          runAsUser: 0 
+        resources:
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            apt-get update && apt-get install -y curl jq
+            # Download kubectl binary
+            curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+            chmod +x kubectl
+            mv kubectl /usr/local/bin/
+            
+            pip3 install flask
+
+            cat <<EOF > app.py
+            from flask import Flask, request, jsonify
+            import subprocess
+            import re
+            import math
+
+            app = Flask(__name__)
+
+            def parse_memory_to_mi(mem_str):
+                """Converts K8s memory strings (Gi, Mi, M, G) to Megabytes (Mi)."""
+                try:
+                    number = int(re.search(r'\d+', mem_str).group())
+                    if 'Gi' in mem_str or 'G' in mem_str:
+                        return number * 1024
+                    if 'Mi' in mem_str or 'M' in mem_str:
+                        return number
+                    return number # Assume Mi if no unit
+                except Exception:
+                    return None
+
+            @app.route('/increase-memory', methods=['POST'])
+            def increase_memory():
+                data = request.json
+                # Expecting a list: {"deployments": ["app-1", "app-2"]}
+                deploy_list = data.get('deployments', [])
+                
+                if not isinstance(deploy_list, list) or not deploy_list:
+                    return jsonify({"error": "Missing 'deployments' list in request body"}), 400
+
+                results = []
+
+                for deploy_name in deploy_list:
+                    try:
+                        # 1. Get current memory limit
+                        cmd_get = f"kubectl get deployment {deploy_name} -o jsonpath='{{.spec.template.spec.containers[0].resources.limits.memory}}'"
+                        res_get = subprocess.run(cmd_get, shell=True, capture_output=True, text=True)
+                        
+                        current_mem = res_get.stdout.strip()
+                        if not current_mem:
+                            results.append({"deployment": deploy_name, "status": "failed", "reason": "No limits defined"})
+                            continue
+
+                        # 2. Calculate +10%
+                        current_mi = parse_memory_to_mi(current_mem)
+                        if current_mi is None:
+                            results.append({"deployment": deploy_name, "status": "failed", "reason": f"Could not parse {current_mem}"})
+                            continue
+                            
+                        new_mi = math.ceil(current_mi * 1.10)
+                        new_mem_str = f"{new_mi}Mi"
+
+                        # 3. Get container name dynamically
+                        cmd_name = f"kubectl get deployment {deploy_name} -o jsonpath='{{.spec.template.spec.containers[0].name}}'"
+                        container_name = subprocess.run(cmd_name, shell=True, capture_output=True, text=True).stdout.strip()
+
+                        # 4. Apply Strategic Merge Patch
+                        patch_json = f'{{"spec":{{"template":{{"spec":{{"containers":[{{ "name":"{container_name}", "resources":{{ "limits":{{ "memory":"{new_mem_str}" }} }} }}]}}}}}}}}'
+                        patch_cmd = ["kubectl", "patch", "deployment", deploy_name, "--type=strategic", "-p", patch_json]
+                        
+                        res_patch = subprocess.run(patch_cmd, capture_output=True, text=True)
+
+                        if res_patch.returncode == 0:
+                            results.append({"deployment": deploy_name, "status": "success", "new_limit": new_mem_str})
+                        else:
+                            results.append({"deployment": deploy_name, "status": "failed", "reason": res_patch.stderr.strip()})
+
+                    except Exception as e:
+                        results.append({"deployment": deploy_name, "status": "error", "reason": str(e)})
+
+                return jsonify({"results": results}), 200
+
+            if __name__ == '__main__':
+                app.run(host='0.0.0.0', port=8080)
+
+            app.run(host='0.0.0.0', port=8080)
+            EOF
+            python3 app.py
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: scaler-service
+spec:
+  selector:
+    app: scaler
+  ports:
+    - protocol: TCP
+      port: 80        # The port visible to the internet
+      targetPort: 8080 # The port your Flask app listens on
+  type: LoadBalancer

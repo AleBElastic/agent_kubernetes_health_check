@@ -58,7 +58,6 @@ spec:
           while true; do
             echo "[INFO] Service ready waiting for connections..."
             sleep 20
-            echo "[CRITICAL] Memory leak starting! Attempting to use 500MB..."
             # This will exceed the 256Mi limit and trigger an OOMKilled event
             stress-ng --vm 1 --vm-bytes 500M --cpu 1 --timeout 10s
           done
